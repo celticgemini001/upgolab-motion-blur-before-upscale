@@ -164,7 +164,7 @@ finer frequency.</p>
 expected and not a defect: there is no such thing as a perfect interpolator, so a real Lanczos
 resampler has a slightly narrower passband than the ideal, and its own roll-off stacks on top of
 the blur's. The important part is the magnitude. Going from 2× to 4× — four times the output
-pixels, four times the compute — changes the recovered cutoff by <strong>0.03 percentage
+pixels, four times the compute — changes the recovered <a href="https://celticgemini001.github.io/upgolab-video-upscaling-limits/">cutoff</a> by <strong>0.03 percentage
 points</strong> at L = 15. More pixels do not buy back a single line pair that the motion
 removed.</p>
 
@@ -200,7 +200,7 @@ of the cutoff: not that the picture is dimmer, but that it stops containing edge
 <h2>Can deconvolution put the detail back? It depends entirely on the crop</h2>
 
 <p>This is where I got a result I did not expect, twice, and the second version overturned the
-first. A Wiener deconvolution with the correct box kernel should invert the blur, given a good
+first. A Wiener <a href="https://celticgemini001.github.io/upgolab-sharpen-before-or-after-upscale/">deconvolution</a> with the correct box kernel should invert the blur, given a good
 estimate of the noise-to-signal ratio. My first attempt reported a PSNR <em>loss</em> at every
 noise level, between &minus;4.2 and &minus;5.8 dB, which would have been a clean negative result.
 It was an artefact: the tile was small enough that the FFT's circular wrap error at the border
@@ -378,7 +378,6 @@ null   = 1.0 / L
 f10    = 0.9112 / L      # H(f) = 0.10</code></pre>
 
 </article>
-
 <footer>
 <p>Published by UpgoLAB — AI photo and short-video upscaling in
 the browser. Measured with numpy 1.26.4 and Pillow 12.2.0 on two content-hashed source
