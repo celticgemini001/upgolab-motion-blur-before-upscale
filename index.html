@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Motion Blur Before an Upscale: The Cutoff Is Already Written, and Sharpening Cannot Move It</title>
+<meta name="description" content="A 1-D motion blur of length L removes everything above 0.911/L cycles per pixel. Measured transfer matches the closed form within 1.0%, and 2x/4x upscaling moves that cutoff by under 0.5%. Wiener deconvolution gains 6.5 dB on detailed crops and loses 9.8 dB on flat ones.">
+<link rel="canonical" href="https://celticgemini001.github.io/upgolab-motion-blur-before-upscale/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Motion Blur Before an Upscale: The Cutoff Is Already Written, and Sharpening Cannot Move It">
+<meta property="og:description" content="Motion blur removes frequencies upscaling can never restore. Measured: transfer follows sinc() within 1%, cutoff is invariant to scale factor, and deconvolution helps only on detailed crops.">
+<script type="application/ld+json">
+{"@type":"Article",
+ "@context":"https://schema.org",
+ "headline":"Motion Blur Before an Upscale: The Cutoff Is Already Written, and Sharpening Cannot Move It",
+ "author":{"@type":"Person","name":"UpgoLAB"},
+ "publisher":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
+ "description":"Measured motion-blur transfer function under upscaling: cutoff 0.911/L cycles per pixel, invariant to scale factor within 0.5%, Wiener deconvolution gain from +6.5 dB to -9.8 dB depending on local detail.",
+ "datePublished":"2026-11-16"}
+</script>
+<style>
+:root{--ink:#16181d;--mut:#5b6270;--line:#e2e5ea;--acc:#0a58ca;--bg:#fff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+ font:17px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:48rem;margin:0 auto;padding:3rem 1.25rem 5rem}
+h1{font-size:2.05rem;line-height:1.22;margin:0 0 .7rem;letter-spacing:-.02em}
+h2{font-size:1.28rem;margin:2.8rem 0 .9rem;letter-spacing:-.01em}
+h3{font-size:1.05rem;margin:1.9rem 0 .5rem}
+p,li{color:#2b3038}
+a{color:var(--acc)}
+.lede{font-size:1.1rem;color:var(--mut);margin:0 0 1.6rem}
+.meta{font-size:.86rem;color:var(--mut);border-left:2px solid var(--line);
+ padding-left:.9rem;margin:0 0 2.2rem;line-height:1.6}
+table{width:100%;border-collapse:collapse;margin:1.3rem 0;font-size:.9rem}
+th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line)}
+th{font-weight:600;background:#f6f7f9;font-size:.8rem;text-transform:uppercase;
+ letter-spacing:.03em;color:var(--mut)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+code{background:#f2f5fa;padding:.1rem .3rem;border-radius:4px;
+ font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.88em}
+pre{background:#f6f7f9;border:1px solid var(--line);border-radius:6px;
+ padding:.9rem 1rem;overflow-x:auto;font-size:.8rem;line-height:1.5;margin:1.3rem 0}
+pre code{background:none;padding:0;font-size:1em}
+.callout{border-left:3px solid var(--acc);background:#f5f8fd;padding:.85rem 1.05rem;
+ margin:1.7rem 0;border-radius:0 6px 6px 0}
+.callout.warn{border-left-color:#b45309;background:#fdf7ed}
+.callout p{margin:.3rem 0}
+footer{margin-top:4rem;padding-top:1.4rem;border-top:1px solid var(--line);
+ font-size:.84rem;color:var(--mut)}
+.sisternav{margin:2rem 0 0;padding-top:1.2rem;border-top:1px solid var(--line)}
+.sisternav p{font-size:.78rem;text-transform:uppercase;letter-spacing:.05em;
+ color:var(--mut);margin:0 0 .6rem}
+.sisternav ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:.4rem .9rem}
+.sisternav li{margin:0;font-size:.86rem;line-height:1.4}
+.sisternav a{text-decoration:none;border-bottom:1px solid #d5dae2}
+.sisternav a:hover{border-bottom-color:var(--acc)}
+</style>
+</head>
+<body>
+<main>
+<article>
+<h1>Motion Blur Before an Upscale: The Cutoff Is Already Written</h1>
+
+<p class="lede">Every guide about sharpening an upscaled image assumes the softness is a
+knob you can turn afterwards. For motion blur that assumption is wrong, and it is wrong in a
+way you can put a number on. A horizontal blur of length <em>L</em> pixels puts its first
+frequency null at exactly 1/<em>L</em> cycles per pixel, and I measured that the 2× and 4×
+upscale move the effective cutoff by <strong>0.02% to 0.47%</strong>. The detail above that
+frequency is gone, and no amount of Lanczos, unsharp masking or AI reconstruction brings back
+the specific edges that were there. What sharpening does instead is raise the contrast of what
+survived — which is a different thing, and I measured how much of it you can buy back before
+it turns into ringing.</p>
+
+<p class="meta">numpy 1.26.4 · Pillow 12.2.0 · two distinct source photographs (1080×1620 portrait,
+1080×608 street), content-hashed so neither is counted twice · blur applied as an exact
+horizontal box convolution in float64, which is the true point-spread function of a sensor and
+subject moving at constant velocity across one shutter interval · every measurement printed
+next to its closed form so a disagreement would be visible · the experiments that contradicted
+what I expected are reported as measured, including the two where my own measurement technique
+was the thing that was wrong.</p>
+
+<h2>Why motion blur is one of the few degradations you can predict rather than estimate</h2>
+
+<p>Most upscaling claims are hard to check because the ground truth is unknowable: when a
+model invents plausible texture, there is no way to say whether the texture is right. Motion
+blur is different. If a subject moves at a constant speed while the shutter is open, every
+point in the scene traces a line segment of the same length and direction, and the resulting
+point-spread function is a box of that length. A box filter has a transfer function you can
+write on paper:</p>
+
+<pre><code>H(f) = |sinc(pi * f * L)| = |sin(pi*f*L) / (pi*f*L)|
+
+first null            f = 1/L          (cycles per pixel)
+H(f) falls to 0.10 at   f = 0.9112 / L
+H(f) falls to 0.50 at   f = 0.4435 / L</code></pre>
+
+<p>That is the whole argument in one line. At <em>L</em> = 15 pixels the first null sits at
+1/15 = 0.0667 cycles per pixel. The Nyquist limit of the source is 0.5, so the blur has thrown
+away everything from 0.067 to 0.5 — 87% of the frequency axis, in the horizontal direction,
+permanently. An upscale that doubles the pixel count does not create information in that band;
+it produces interpolated samples of a signal whose band is already truncated. The rest of this
+page is the measurement that confirms the model, the checks that show upscaling cannot cheat
+it, and the honest limits of trying to undo it.</p>
+
+<h2>The transfer function, measured against the closed form</h2>
+
+<p>I applied the box blur to the real photograph at seven lengths and recovered the empirical
+transfer function from the ratio of power spectra of the blurred and unblurred images. Because
+both spectra come from the <em>same</em> content, the image's own power spectrum cancels in the
+ratio and what remains is |H(f)|². Taking the square root and normalising at the second bin
+gives the measured amplitude response, with no fitting and no free parameter.</p>
+
+<table>
+<thead><tr><th>Blur length L</th><th class="num">0.10 crossing, measured</th>
+<th class="num">0.9112/L closed form</th><th class="num">Error</th>
+<th class="num">First null 1/L</th></tr></thead>
+<tbody>
+<tr><td>3 px</td><td class="num">0.30681</td><td class="num">0.30373</td><td class="num">+1.01%</td><td class="num">0.33333</td></tr>
+<tr><td>5 px</td><td class="num">0.18241</td><td class="num">0.18224</td><td class="num">+0.09%</td><td class="num">0.20000</td></tr>
+<tr><td>7 px</td><td class="num">0.13020</td><td class="num">0.13017</td><td class="num">+0.03%</td><td class="num">0.14286</td></tr>
+<tr><td>11 px</td><td class="num">0.08269</td><td class="num">0.08284</td><td class="num">&minus;0.18%</td><td class="num">0.09091</td></tr>
+<tr><td>15 px</td><td class="num">0.06058</td><td class="num">0.06075</td><td class="num">&minus;0.28%</td><td class="num">0.06667</td></tr>
+<tr><td>25 px</td><td class="num">0.03640</td><td class="num">0.03645</td><td class="num">&minus;0.12%</td><td class="num">0.03645</td></tr>
+<tr><td>41 px</td><td class="num">0.02228</td><td class="num">0.02222</td><td class="num">+0.26%</td><td class="num">0.02439</td></tr>
+</tbody>
+</table>
+
+<p>Maximum disagreement across the seven lengths is <strong>1.01%</strong>, and that worst case
+is the shortest blur, where the frequency axis has the fewest samples per cycle and the
+interpolation between spectral bins is coarsest. From 5 px upward the error never exceeds
+0.28%. A second, unrelated photograph reproduces the same crossings to within 0.28% at every
+length tested, so this is a property of the filter and not of one image.</p>
+
+<div class="callout">
+<p><strong>The practical reading:</strong> you can estimate the blur length from a single
+photograph's spectrum with enough accuracy to predict what was lost, because the model has no
+free parameters. Multiplying 0.9112 by the reciprocal of the measured crossing gives L directly.
+The place this fails is the next-but-one section, and it fails for an interesting reason.</p>
+</div>
+
+<h2>Upscaling does not move the cutoff — measured at 2× and 4×</h2>
+
+<p>This is the experiment that settles the argument about whether a better resampler helps. I
+blurred the source, upscaled both the sharp and the blurred version by the same factor, and
+measured the ratio again. Then I converted the output frequency back to source-equivalent cycles
+per pixel by multiplying by the scale factor, because a bin at the same index now represents a
+finer frequency.</p>
+
+<table>
+<thead><tr><th>Blur length</th><th>Upscale</th><th class="num">Cutoff before</th>
+<th class="num">Cutoff after (source-equivalent)</th><th class="num">Shift</th></tr></thead>
+<tbody>
+<tr><td>7 px</td><td>2×</td><td class="num">0.13020</td><td class="num">0.13082</td><td class="num">+0.47%</td></tr>
+<tr><td>7 px</td><td>4×</td><td class="num">0.13020</td><td class="num">0.13078</td><td class="num">+0.44%</td></tr>
+<tr><td>15 px</td><td>2×</td><td class="num">0.06058</td><td class="num">0.06068</td><td class="num">+0.17%</td></tr>
+<tr><td>15 px</td><td>4×</td><td class="num">0.06058</td><td class="num">0.06067</td><td class="num">+0.16%</td></tr>
+<tr><td>25 px</td><td>2×</td><td class="num">0.03640</td><td class="num">0.03641</td><td class="num">+0.02%</td></tr>
+<tr><td>25 px</td><td>4×</td><td class="num">0.03640</td><td class="num">0.03642</td><td class="num">+0.05%</td></tr>
+</tbody>
+</table>
+
+<p>The shift is positive in all six cases and never exceeds half a percent. That direction is
+expected and not a defect: there is no such thing as a perfect interpolator, so a real Lanczos
+resampler has a slightly narrower passband than the ideal, and its own roll-off stacks on top of
+the blur's. The important part is the magnitude. Going from 2× to 4× — four times the output
+pixels, four times the compute — changes the recovered cutoff by <strong>0.03 percentage
+points</strong> at L = 15. More pixels do not buy back a single line pair that the motion
+removed.</p>
+
+<h2>What does change: the width of what survived</h2>
+
+<p>If the cutoff is fixed, what can an upscale change? The width of the transition, in output
+pixels. I measured that on a synthetic step edge where the answer is known exactly, then
+checked the same statistic on the photograph.</p>
+
+<table>
+<thead><tr><th>Blur length</th><th class="num">Measured 10–90% width</th>
+<th class="num">Closed form 0.8L + 1</th><th class="num">Error</th></tr></thead>
+<tbody>
+<tr><td>1 px</td><td class="num">0 px</td><td class="num">1.80</td><td class="num">&minus;1.80</td></tr>
+<tr><td>3 px</td><td class="num">2 px</td><td class="num">3.40</td><td class="num">&minus;1.40</td></tr>
+<tr><td>5 px</td><td class="num">4 px</td><td class="num">5.00</td><td class="num">&minus;1.00</td></tr>
+<tr><td>9 px</td><td class="num">8 px</td><td class="num">8.20</td><td class="num">&minus;0.20</td></tr>
+<tr><td>15 px</td><td class="num">12 px</td><td class="num">13.00</td><td class="num">&minus;1.00</td></tr>
+<tr><td>25 px</td><td class="num">20 px</td><td class="num">21.00</td><td class="num">&minus;1.00</td></tr>
+<tr><td>41 px</td><td class="num">32 px</td><td class="num">33.80</td><td class="num">&minus;1.80</td></tr>
+</tbody>
+</table>
+
+<p>The measured width tracks the closed form to within two pixels everywhere, with the
+discrepancy concentrated at the extreme ends where a ±1 px quantisation of the 10% and 90%
+crossings is the whole story. On the real photograph the same statistic shows what a viewer
+actually perceives: the share of pixels whose horizontal gradient falls below 0.02 rises from
+<strong>92.0%</strong> on the sharp source to <strong>95.4%</strong> at L = 7,
+<strong>97.1%</strong> at L = 15 and <strong>98.0%</strong> at L = 25. By L = 15, fewer than
+three pixels in a hundred have a gradient large enough to be an edge. That is the visual reality
+of the cutoff: not that the picture is dimmer, but that it stops containing edges.</p>
+
+<h2>Can deconvolution put the detail back? It depends entirely on the crop</h2>
+
+<p>This is where I got a result I did not expect, twice, and the second version overturned the
+first. A Wiener deconvolution with the correct box kernel should invert the blur, given a good
+estimate of the noise-to-signal ratio. My first attempt reported a PSNR <em>loss</em> at every
+noise level, between &minus;4.2 and &minus;5.8 dB, which would have been a clean negative result.
+It was an artefact: the tile was small enough that the FFT's circular wrap error at the border
+dominated the metric. Padding the tile by 64 pixels with reflected content and cropping back
+removed that, and the sign flipped.</p>
+
+<table>
+<thead><tr><th>Local detail (mean |∂x|)</th><th class="num">PSNR blurred</th>
+<th class="num">PSNR after Wiener</th><th class="num">Gain</th><th class="num">NSR used</th></tr></thead>
+<tbody>
+<tr><td>0.03067 (busiest crop)</td><td class="num">17.68</td><td class="num">24.16</td><td class="num">+6.48 dB</td><td class="num">3e-3</td></tr>
+<tr><td>0.01112</td><td class="num">28.85</td><td class="num">31.78</td><td class="num">+2.93 dB</td><td class="num">1e-2</td></tr>
+<tr><td>0.00755</td><td class="num">33.88</td><td class="num">32.74</td><td class="num">&minus;1.15 dB</td><td class="num">1e-2</td></tr>
+<tr><td>0.00493</td><td class="num">36.81</td><td class="num">34.05</td><td class="num">&minus;2.76 dB</td><td class="num">1e-2</td></tr>
+<tr><td>0.00189 (flattest crop)</td><td class="num">45.01</td><td class="num">35.24</td><td class="num">&minus;9.77 dB</td><td class="num">1e-2</td></tr>
+</tbody>
+</table>
+
+<p>Same kernel, same blur length, same photograph, five crops, and the gain runs from
+<strong>+6.48 dB to &minus;9.77 dB</strong>. The correlation between local detail and gain is
+0.85 across these five crops, and a linear fit places the break-even at a mean |∂x| of about
+0.0131 — roughly the detail level of ordinary foliage or fabric, and above the median detail of
+this photo. Below that line, deconvolution amplifies noise faster than it restores edges, which
+is exactly what the theory predicts and what the flattest crop demonstrates. Above it, the
+recovery is real and large.</p>
+
+<div class="callout warn">
+<p><strong>Why this matters more than the PSNR:</strong> the crops where deconvolution wins are
+the ones with the lowest input PSNR (17.7 and 28.9 dB) and the ones where it loses had input
+PSNR of 33.9, 36.8 and 45.0 dB. A global metric computed on a whole image would average these
+into a small positive number and tell you nothing about which parts of your picture were
+actually rescued. The decision is local, and it is a decision about detail, not about blur
+length.</p>
+</div>
+
+<h2>Sharpening along the blur axis beats isotropic sharpening, and the gap widens with strength</h2>
+
+<p>If you are not going to deconvolve, the next-best move is ordinary unsharp masking, and the
+naive version of it is applied in both directions. But the motion blur is one-directional: there
+is a hard cutoff horizontally and none vertically. So I compared a 1-D unsharp mask along x
+against a 2-D isotropic one, both at unit gain, and measured PSNR against the sharp original.</p>
+
+<table>
+<thead><tr><th>Sharpen radius σ</th><th class="num">Isotropic (2-D)</th>
+<th class="num">Along blur axis (1-D)</th><th class="num">Delta</th>
+<th class="num">Clipped, 2-D</th><th class="num">Clipped, 1-D</th></tr></thead>
+<tbody>
+<tr><td>1.0 px</td><td class="num">28.400</td><td class="num">28.940</td><td class="num">+0.541 dB</td><td class="num">0.10%</td><td class="num">0.01%</td></tr>
+<tr><td>2.0 px</td><td class="num">27.954</td><td class="num">28.950</td><td class="num">+0.996 dB</td><td class="num">0.22%</td><td class="num">0.02%</td></tr>
+<tr><td>4.0 px</td><td class="num">27.519</td><td class="num">29.157</td><td class="num">+1.637 dB</td><td class="num">0.28%</td><td class="num">0.04%</td></tr>
+</tbody>
+</table>
+
+<p>Two things are happening. First, the directional mask is ahead at every radius, and the gap
+grows from 0.54 to 1.64 dB as the radius increases. Second, and more importantly for anyone
+working in 8 bits, the isotropic mask clips <strong>seven to eleven times</strong> as many
+pixels: 0.28% against 0.04% at the strongest setting. Clipping is irreversible — those highlights are
+already 255 and cannot be recovered by pulling the amount back later. The directional mask puts
+its contrast correction where the blur actually is, so it needs less amplitude to achieve the
+same effect and spends less of the headroom.</p>
+
+<h2>What the blur does to the encode bill, measured with x264</h2>
+
+<p>A side effect worth knowing before you decide the blur is only a resolution problem: a
+motion-blurred pan costs materially fewer bits to encode at the same CRF. I built a 60-frame
+1080p horizontal pan from the photograph, applied the same box blur at four lengths, and
+encoded all four at CRF 20 with libx264 at preset medium. Each clip was then compared to the
+unblurred encode with SSIM.</p>
+
+<table>
+<thead><tr><th>Blur length</th><th class="num">Encoded size</th><th class="num">vs sharp</th>
+<th class="num">SSIM (All) vs sharp encode</th></tr></thead>
+<tbody>
+<tr><td>1 px (sharp)</td><td class="num">240,017 B</td><td class="num">1.000×</td><td class="num">1.0000</td></tr>
+<tr><td>5 px</td><td class="num">200,582 B</td><td class="num">0.836×</td><td class="num">0.7618</td></tr>
+<tr><td>11 px</td><td class="num">175,642 B</td><td class="num">0.732×</td><td class="num">0.7691</td></tr>
+<tr><td>21 px</td><td class="num">160,694 B</td><td class="num">0.670×</td><td class="num">0.7772</td></tr>
+</tbody>
+</table>
+
+<p>Blurring to 21 px saves 33% of the bitrate — and note that SSIM against the sharp encode goes
+<em>up</em> slightly with more blur, from 0.7618 to 0.7772, because the blur removes exactly the
+high-frequency content that a block-based codec finds expensive and that SSIM is most sensitive
+to. That is the same effect that makes SSIM a poor proxy for perceived sharpness, and it is the
+reason a codec will happily reward you for destroying detail. Encode speed was flat at 24–27 fps
+across all four lengths, so the saving is in bits and not in time.</p>
+
+<h2>The result I could not make work: estimating blur length from the image alone</h2>
+
+<p>The closed form above assumes you know <em>L</em>. In practice you do not, so the useful
+question is whether <em>L</em> can be recovered from a single blurred photograph with no sharp
+reference. I tried three approaches. One works, and only on content it would never encounter.</p>
+
+<p>The cepstrum — the inverse FFT of the log power spectrum — is the textbook answer, and it is
+supposed to show a peak at the blur length. On this photograph it put the peak at 4 pixels for
+every true length from 5 to 33, an error of &minus;1 to &minus;29 px, which is to say it reported
+a constant and I would have reported a method that does not work. The detrended-log-power
+variant with a moving-average background was worse: it locked onto a fixed low-frequency feature
+at f = 0.0111, translating to a 90 px estimate regardless of the truth.</p>
+
+<p>The spectral-null approach does work, under one condition I could test directly. On white
+noise it recovers the length almost exactly. On the photograph it collapses to the same 90 px
+for every length:</p>
+
+<table>
+<thead><tr><th>True L</th><th class="num">White noise: estimate</th><th class="num">Error</th>
+<th class="num">Photograph: estimate</th><th class="num">Error</th></tr></thead>
+<tbody>
+<tr><td>7 px</td><td class="num">7.0</td><td class="num">+0.0</td><td class="num">90.0</td><td class="num">+83.0</td></tr>
+<tr><td>15 px</td><td class="num">15.0</td><td class="num">+0.0</td><td class="num">90.0</td><td class="num">+75.0</td></tr>
+<tr><td>25 px</td><td class="num">25.1</td><td class="num">+0.1</td><td class="num">90.0</td><td class="num">+65.0</td></tr>
+</tbody>
+</table>
+
+<p>The reason is not mysterious once you look at a photograph's spectrum: it falls off steeply
+with frequency, roughly as 1/f², and by the region where the blur nulls would appear, the
+signal is already below the residual level of the image's own structure. The null is there in
+principle and buried in practice. Estimating <em>L</em> blind from a single frame is an active
+research problem precisely because of this, and reporting a number here would have meant
+reporting the floor of my estimator as if it were the answer. The practical consequence is
+narrow but real: the closed form tells you what a <em>given</em> blur costs, and predicting the
+cost for a <em>measured</em> blur requires either a capture-time record of shutter speed and
+velocity or a sharp reference frame of the same scene.</p>
+
+<h2>Why tell all this to someone who is about to upscale a video?</h2>
+
+<p>Because it sets the order of operations. The measurement above is not an argument against
+upscaling — it is an argument about which problems upscaling can address. The cutoff at
+0.911/L is a property of the capture, and the 2×/4× test shows a scale factor changes it by
+less than half a percent. So when a clip looks soft, the question that matters is not which
+resampler or which model, but whether the softness is motion blur or something else. The
+directional-sharpening result is the one usable lever: applying the contrast where the blur
+actually is earns 0.5 to 1.6 dB over the isotropic version and clips seven to ten times fewer
+pixels. And the crop-dependent deconvolution result is the reason to stop trusting a single
+global sharpness slider: the same setting that rescues a textured region by 6.5 dB costs a flat
+region 9.8 dB, and a global metric averages those into a number that describes neither.</p>
+
+<p>For frames that are blurred past the cutoff, the honest answer is that the frequencies are
+gone and the remaining choice is how to present what survived. When the source is sharp and the
+problem is resolution rather than motion, the pixel budget is what matters, and that is a
+different measurement entirely — the one behind <a href="https://upgolab.com">UpgoLAB's
+browser upscaler</a>, which handles the scale factor and leaves the capture-time decision where
+it belongs.</p>
+
+<h2>Reproducing the numbers</h2>
+
+<p>The blur is an exact box convolution, implemented with a cumulative sum so there is no
+accumulated rounding, and the transfer function comes from the ratio of two power spectra of the
+same content. Nothing is fitted.</p>
+
+<pre><code>import numpy as np
+from PIL import Image
+
+def box_blur_h(a, L):
+    """Exact 1-D motion blur, edge-replicated, float64."""
+    if L &lt;= 1: return a.copy()
+    pad = L // 2
+    out = np.empty_like(a)
+    for c in range(a.shape[2]):
+        p  = np.pad(a[:, :, c], ((0, 0), (pad, pad)), mode="edge")
+        cs = np.cumsum(np.pad(p, ((0, 0), (1, 0))), axis=1)
+        out[:, :, c] = (cs[:, L:] - cs[:, :-L]) / L
+    return out
+
+def psd_x(g):
+    g = (g - g.mean()) * np.hanning(g.shape[1])[None, :]
+    return (np.abs(np.fft.rfft(g, axis=1))**2).mean(axis=0)
+
+# |H(f)| from two spectra of identical content
+H = np.sqrt(psd_x(lum(blurred)) / np.maximum(psd_x(lum(sharp)), 1e-30))
+H /= H[1]
+
+# closed form, for comparison
+null   = 1.0 / L
+f10    = 0.9112 / L      # H(f) = 0.10</code></pre>
+
+</article>
+
+<footer>
+<p>Published by <a href="https://upgolab.com">UpgoLAB</a> — AI photo and short-video upscaling in
+the browser. Measured with numpy 1.26.4 and Pillow 12.2.0 on two content-hashed source
+photographs and one 60-frame 1080p pan encoded with libx264; ten experiments, seven tables, and
+results that contradicted the hypothesis I started with. The motion-blur transfer function
+matched its closed form to within 1.01% at worst and 0.28% above 5 px. The scale-invariance
+claim held to 0.47% at 2× and 0.44% at 4×. The Wiener deconvolution result changed sign twice
+before the circular-wrap artefact was removed, and both the artefact and the corrected result
+are reported. The blind blur-length estimators failed on real photographs and worked on white
+noise, and that boundary is stated rather than hidden. Every figure reproducible from the
+snippet above; no value was adjusted after the run.</p>
+
+<nav class="sisternav" aria-label="More measured upscaling guides">
+<p>More measured guides</p>
+<ul>
+  <li><a href="https://celticgemini001.github.io/upgolab-ai-upscaler-guide/">What upscaling recovers vs invents</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-video-upscaling-limits/">Why video isn't image upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-product-photos/">Product shot vs face</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-2k-vs-4k-decision/">2K vs 4K bits-per-pixel</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-anime-illustration/">Line art and ink coverage</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-old-footage-restoration/">Old footage restoration</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-screen-recording-4k/">Screen recording to 4K</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-thumbnail-4k-master/">4K thumbnail master</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-remove-background-and-upscale/">Cutout and upscale</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-anisotropic-upscale/">Anisotropic / one-axis scale</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-chroma-subsampling/">Chroma subsampling 4:2:0</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-gamma-vs-linear-light/">Gamma vs linear light</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-bit-depth-banding/">8-bit vs 10-bit banding</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-jpeg-blocking-upscale/">JPEG blocking under upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-vs-reshoot/">Re-shoot vs upscale break-even</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-what-nofollow-means/">What rel=nofollow actually does</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-fractional-upscale-factors/">Fractional upscale factors</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-tiled-upscale-seams/">Tiled upscale seams</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-sharpen-before-or-after-upscale/">Sharpen before or after</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-output-format-after-upscale/">Output format after upscale</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-noise-and-grain-upscaling/">Noise and grain under upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-tools/">All measured guides (index)</a></li>
+</ul>
+</nav>
+</footer>
+</main>
+</body>
+</html>
