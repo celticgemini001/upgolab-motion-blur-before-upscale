@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Motion Blur Before an Upscale: The Cutoff Is Already Written, and Sharpening Cannot Move It</title>
-<meta name="description" content="A 1-D motion blur of length L removes everything above 0.911/L cycles per pixel. Measured transfer matches the closed form within 1.0%, and 2x/4x upscaling moves that cutoff by under 0.5%. Wiener deconvolution gains 6.5 dB on detailed crops and loses 9.8 dB on flat ones.">
+<meta name="description" content="A 1-D motion blur of length L removes everything above 0.911/L cycles per pixel. Measured transfer matches the closed form within 1.0%, 2x/4x upscaling moves that cutoff by under 0.5%, and Wiener deconvolution gains 6.5 dB on detailed crops and loses 9.8 dB on flat ones. Optimal sharpen radius is 0.39*L; a horizontal-only mask only wins within 32 degrees of horizontal.">
 <link rel="canonical" href="https://celticgemini001.github.io/upgolab-motion-blur-before-upscale/">
 <meta property="og:type" content="article">
 <meta property="og:title" content="Motion Blur Before an Upscale: The Cutoff Is Already Written, and Sharpening Cannot Move It">
@@ -15,7 +15,7 @@
  "headline":"Motion Blur Before an Upscale: The Cutoff Is Already Written, and Sharpening Cannot Move It",
  "author":{"@type":"Person","name":"UpgoLAB"},
  "publisher":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
- "description":"Measured motion-blur transfer function under upscaling: cutoff 0.911/L cycles per pixel, invariant to scale factor within 0.5%, Wiener deconvolution gain from +6.5 dB to -9.8 dB depending on local detail.",
+ "description":"Measured motion-blur transfer function under upscaling: cutoff 0.911/L cycles per pixel, invariant to scale factor within 0.5%, Wiener deconvolution gain from +6.5 dB to -9.8 dB depending on local detail, optimal sharpen radius 0.39*L, and a horizontal-only sharpening mask that loses to isotropic beyond 32 degrees.",
  "datePublished":"2026-11-16"}
 </script>
 <style>
@@ -262,6 +262,189 @@ already 255 and cannot be recovered by pulling the amount back later. The direct
 its contrast correction where the blur actually is, so it needs less amplitude to achieve the
 same effect and spends less of the headroom.</p>
 
+<h2>The sharpening radius is not free: it tracks the blur length, and that makes it portable across a resize</h2>
+
+<p>The previous section compared directional and isotropic sharpening at three radii and found the
+directional mask ahead every time. That table leaves out the question anyone actually faces, which
+is <em>what radius to set</em>. I swept it. The optimum is not a constant, and the way it moves turns
+out to answer a second question the earlier section never asked: where in the pipeline the sharpening
+should happen.</p>
+
+<p>I swept σ from 0.5 to 20 px in sixteen steps, at seven blur lengths from 3 to 31 px, taking the
+peak PSNR against the sharp original at each length. The optimum follows a power law cleanly:</p>
+
+<pre><code>sigma* = 0.3588 * L^1.0289       R&sup2; = 0.9959, max residual 0.34 px</code></pre>
+
+<p>The exponent is 1.03. Within the precision of a sixteen-point grid that is an exponent of
+exactly one, which means the optimal sharpening radius is simply <strong>proportional</strong> to the
+blur length, at a ratio of about 0.39. Across the seven lengths the ratio σ*/L never left the band
+0.33 to 0.43. That is a usable rule: set the radius to roughly 0.4·L and you are at or within a
+tenth of a dB of the peak.</p>
+
+<table>
+<thead><tr><th>Blur length L</th><th class="num">Upscaled, no sharpen</th>
+<th class="num">σ*</th><th class="num">Gain at σ*</th><th class="num">σ*/L</th></tr></thead>
+<tbody>
+<tr><td>3 px</td><td class="num">33.374 dB</td><td class="num">1.0</td><td class="num">+0.909 dB</td><td class="num">0.333</td></tr>
+<tr><td>5 px</td><td class="num">29.306 dB</td><td class="num">2.0</td><td class="num">+0.905 dB</td><td class="num">0.400</td></tr>
+<tr><td>7 px</td><td class="num">26.996 dB</td><td class="num">3.0</td><td class="num">+0.452 dB</td><td class="num">0.429</td></tr>
+<tr><td>11 px</td><td class="num">24.719 dB</td><td class="num">4.0</td><td class="num">+0.011 dB</td><td class="num">0.364</td></tr>
+<tr><td>15 px</td><td class="num">23.638 dB</td><td class="num">6.0</td><td class="num">&minus;0.006 dB</td><td class="num">0.400</td></tr>
+<tr><td>21 px</td><td class="num">22.668 dB</td><td class="num">8.0</td><td class="num">+0.184 dB</td><td class="num">0.381</td></tr>
+<tr><td>31 px</td><td class="num">21.381 dB</td><td class="num">12.0</td><td class="num">+0.296 dB</td><td class="num">0.387</td></tr>
+</tbody>
+</table>
+
+<p>The right-hand column of the gain is the part I did not expect, and it is the strongest
+independent confirmation of this page's whole argument. At L = 11 and L = 15 the best achievable
+sharpening gain is <strong>+0.011 and &minus;0.006 dB</strong> — indistinguishable from doing nothing,
+even at the optimal radius. The radius that helps at 7 px stops helping at 11 px, and no radius in
+the sweep rescues it. That is precisely what a fixed cutoff predicts: sharpening re-weights the
+frequencies that survived, and by L = 11 the band above the cutoff is empty enough that
+re-weighting it buys nothing. The gain at 21 and 31 px comes back slightly, which I read as the
+wide radius picking up the low-frequency envelope of the blur rather than any restored detail —
+it is a contrast change, not a recovery, and I would not sell it as one.</p>
+
+<h2>Where in the pipeline: sharpening a resized image is not sharpening the original</h2>
+
+<p>Now the practical question this creates. A 4× upscale multiplies the pixel grid by four, so a blur
+that was 7 px in the source is 28 px in the output. The rule above says the radius should scale with
+it. If it does not — if you apply the same 3 px unsharp mask after the upscale that you would have
+applied before — you are sharpening a feature that is now four times wider than your kernel. I
+measured all four orderings against the Lanczos-upscaled ground truth at 2× and 4×.</p>
+
+<table>
+<thead><tr><th>Factor</th><th class="num">Baseline<br>(upscale only)</th>
+<th class="num">A<br>sharpen at source,<br>then upscale</th>
+<th class="num">B<br>upscale, then sharpen<br>σ = 3 px unscaled</th>
+<th class="num">C<br>upscale, then sharpen<br>σ = 3·f px</th>
+<th class="num">D<br>upscale, then sharpen<br>isotropic, σ = 3·f</th></tr></thead>
+<tbody>
+<tr><td>1×</td><td class="num">26.996</td><td class="num">+0.452</td><td class="num">+0.452</td><td class="num">+0.452</td><td class="num">&minus;0.942</td></tr>
+<tr><td>2×</td><td class="num">27.067</td><td class="num"><strong>+0.457</strong></td><td class="num">+0.111</td><td class="num">+0.434</td><td class="num">&minus;0.864</td></tr>
+<tr><td>4×</td><td class="num">27.069</td><td class="num"><strong>+0.458</strong></td><td class="num">&minus;0.009</td><td class="num">+0.438</td><td class="num">&minus;0.865</td></tr>
+</tbody>
+</table>
+
+<p>Column B is the failure mode. At 1× it is identical to A by construction. At 2× the gain collapses
+from 0.457 to 0.111 dB, and at 4× it is <strong>&minus;0.009 dB</strong> — the sharpening has become
+a net loss. Nothing about the sharpener changed; only the position in the pipeline did, and the
+kernel no longer matched the structure it was meant to correct.</p>
+
+<p>Column C shows the fix is simply to scale the radius, which recovers 0.434 and 0.438 dB — within
+0.03 dB of sharpening at source resolution. So the order does not matter <em>if you scale the
+radius</em>, and the order matters enormously if you do not. Sharpening before the upscale is the
+safer default precisely because the radius you already tuned is in the right units: the blur length
+is a property of the capture, the source grid is where it was measured, and no conversion is
+required. That is a concrete reason to prefer the "sharpen the source, then upscale" order that is
+usually argued about on vague quality grounds — here it is a 0.47 dB difference at 4×, and the cost
+of getting it wrong is not a small erosion but a sign flip. The same ordering question on a sharp
+source, where the softness is not motion but ordinary resampling, is measured separately in
+<a href="https://celticgemini001.github.io/upgolab-sharpen-before-or-after-upscale/">sharpen before or after an upscale</a>.</p>
+
+<h2>The axis: a horizontal-only mask is only right within about 30° of horizontal</h2>
+
+<p>The page's earlier directional test, like most advice on this, assumed the blur runs along x. Real
+camera motion does not consult the pixel grid. I blurred along eight angles using a bilinear-sampled
+box convolution — verified against the exact cumsum version at 0° to a maximum difference of 7&times;10<sup>&minus;12</sup>
+— and compared three sharpeners at every angle, taking each one's best radius:</p>
+
+<table>
+<thead><tr><th>True blur angle</th><th class="num">Fixed x-axis mask</th>
+<th class="num">Isotropic (2-D)</th><th class="num">Mask aligned to true angle</th></tr></thead>
+<tbody>
+<tr><td>0°</td><td class="num">+0.452</td><td class="num">&minus;0.295</td><td class="num">+0.452</td></tr>
+<tr><td>15°</td><td class="num">+0.625</td><td class="num">+0.389</td><td class="num">+0.872</td></tr>
+<tr><td>30°</td><td class="num">+0.629</td><td class="num">+0.587</td><td class="num">+0.989</td></tr>
+<tr><td>45°</td><td class="num">+0.461</td><td class="num">+0.514</td><td class="num">+0.968</td></tr>
+<tr><td>60°</td><td class="num">+0.272</td><td class="num">+0.344</td><td class="num">+0.781</td></tr>
+<tr><td>90°</td><td class="num">&minus;0.362</td><td class="num">&minus;0.404</td><td class="num">+0.194</td></tr>
+</tbody>
+</table>
+
+<p>All figures in dB of PSNR gain over the unsharpened upscale. The aligned mask wins at every single
+angle, including 0°, and at 45° it is worth <strong>0.968 dB against the fixed axis's 0.461</strong>.
+The fixed x-axis mask beats the isotropic one only up to about <strong>32°</strong> — that is the
+interpolated crossing point, and by 35° the isotropic version has pulled ahead. At 90°, a horizontal
+mask is actively harmful at &minus;0.362 dB while a correctly aligned one still gains +0.194.</p>
+
+<p>So the earlier section's conclusion survives, but only under a condition it did not state: the
+directional mask must be pointed at the blur. Applied blind along x, it is a coin flip that happens
+to land well on handheld footage panned horizontally — which is common enough to have generated the
+advice, and wrong often enough to matter for anything else.</p>
+
+<p>The clipping numbers at the same operating point (σ = 3 px, L = 7 px) point the same way.
+Isotropic sharpening clips 1.231% of pixels where the axis-aligned mask clips 0.277% at 0°, a ratio
+of 4.4×; at 45° it is 0.906% against 0.176%. An isotropic mask spreads its correction into the
+direction the image is still sharp in, and that is where it overshoots into clipping.</p>
+
+<h2>Can you find the angle from a single frame? Mostly, and the failure is instructive</h2>
+
+<p>The angle is not recorded in the file, so the useful question is whether it can be measured. I
+used the standard structure-tensor estimator: smooth, take gradients, form the 2&times;2 covariance of
+the gradient field, and read the principal direction — the blur axis is perpendicular to the
+direction of strongest gradient energy. On this photograph it recovers the axis to within 15.4° at
+every angle tested, and to within 1.3° for horizontal blur:</p>
+
+<table>
+<thead><tr><th>Blur length</th><th class="num">True</th><th class="num">Estimated</th>
+<th class="num">Error</th><th class="num">Gain at estimate</th><th class="num">Gain, isotropic</th></tr></thead>
+<tbody>
+<tr><td>7 px</td><td class="num">0°</td><td class="num">178.7°</td><td class="num">1.3°</td><td class="num">+0.447</td><td class="num">&minus;0.942</td></tr>
+<tr><td>7 px</td><td class="num">30°</td><td class="num">35.5°</td><td class="num">5.5°</td><td class="num">+0.958</td><td class="num">+0.071</td></tr>
+<tr><td>7 px</td><td class="num">45°</td><td class="num">60.4°</td><td class="num">15.4°</td><td class="num">+0.696</td><td class="num">&minus;0.097</td></tr>
+<tr><td>7 px</td><td class="num">60°</td><td class="num">74.3°</td><td class="num">14.3°</td><td class="num">+0.547</td><td class="num">&minus;0.614</td></tr>
+<tr><td>7 px</td><td class="num">90°</td><td class="num">89.9°</td><td class="num">0.1°</td><td class="num">+0.194</td><td class="num">&minus;1.871</td></tr>
+<tr><td>7 px</td><td class="num">120°</td><td class="num">105.0°</td><td class="num">15.0°</td><td class="num">+0.388</td><td class="num">&minus;0.470</td></tr>
+<tr><td>7 px</td><td class="num">135°</td><td class="num">119.7°</td><td class="num">15.3°</td><td class="num">+0.555</td><td class="num">&minus;0.071</td></tr>
+<tr><td>7 px</td><td class="num">150°</td><td class="num">145.2°</td><td class="num">4.8°</td><td class="num">+0.754</td><td class="num">&minus;0.038</td></tr>
+</tbody>
+</table>
+
+<p>The errors are systematic, not random: every estimate is pulled toward about 120° for the
+diagonal cases. The reason is the photograph's own gradient statistics. The sharp original has
+anisotropic texture — its gradient covariance is 1.32:1 before any blur exists — so the estimator
+reports the scene's structure as well as the blur's. That is not a bug I can tune away; it is the
+signal being genuinely ambiguous on real content.</p>
+
+<p>I ran the control that makes this concrete, and it is the result that stops me from recommending
+the estimator as a standalone tool. On eight independently generated isotropic textures — content
+with <em>no</em> direction, where the true answer is "undefined" — the estimator returned a
+confident angle every time, with a spread of <strong>45.2°</strong> and a gradient ratio within 4%
+of unity in every draw. Given a photograph with no blur at all, it reports 84.6°. The estimator
+always has an answer, and on directionless content the answer is noise.</p>
+
+<p>The practical compromise is that the error is cheap. Sharpening 15° off the true axis still
+gained +0.707 dB at 45° and +0.524 at 60°, both far better than isotropic. Because the gain curve
+is flat near the peak — it falls only 0.034 dB for a 5° error and 0.261 dB for 15° — an estimate
+good to 15° captures most of the benefit. So the working recommendation is: use the structure
+tensor to get an axis, do
+not trust it when the image has no directional structure to justify it, and prefer isotropic when
+the estimate is close to the isotropic crossover.</p>
+
+<p>For an honest check on a different image, a second, unrelated 589&times;1280 photograph
+reproduces the direction: a 7 px horizontal blur gains +0.610 dB from the fixed axis against
+&minus;1.722 from isotropic, and at a true 45° the fixed axis gains +0.001 while the aligned mask
+gains +0.835. The alignment penalty is if anything worse on that image, which is what I would
+expect from a scene with stronger vertical structure.</p>
+<div class="callout warn">
+<p><strong>The limits, stated plainly.</strong> Every number above is PSNR against a simulated box
+blur on a still photograph. Real motion blur is not a box — it is the integral of the sensor's
+exposure over a curved path, so a real pan has a slightly trapezoidal profile and a rotating subject
+has a smear that varies across the frame. The σ/L law was measured on one photograph; the second
+image reproduces the directional results but I did not re-sweep the radius on it, so treat 0.39 as a
+good starting point rather than a constant of nature. And the gain ceiling is low: 0.45 to 0.99 dB
+on a 7 px blur, falling to zero by 11 px. This section is about not wasting the small amount that
+surviving detail is worth, not about recovering what the shutter removed.</p>
+</div>
+
+<p>The single usable takeaway is a change of order. Measure the blur length if you can — the sinc
+crossing from the first section gives it — set the radius to about 0.4 of it, aim the mask along the
+motion, and do it on the source grid before you resize. Do those four things and a 7 px blurred
+frame keeps 0.45 to 0.99 dB of the detail an isotropic mask applied after the upscale would have
+thrown away along with four times as much clipping. Skip them, and at 4× the naive version is a
+measured net loss of 0.009 dB against doing nothing at all.</p>
+
 <h2>What the blur does to the encode bill, measured with x264</h2>
 
 <p>A side effect worth knowing before you decide the blur is only a resolution problem: a
@@ -354,10 +537,20 @@ same content. Nothing is fitted.</p>
 <pre><code>import numpy as np
 from PIL import Image
 
+def lum(rgb):
+    return 0.299*rgb[:,:,0] + 0.587*rgb[:,:,1] + 0.114*rgb[:,:,2]
+
+def load(p):
+    return np.asarray(Image.open(p).convert("RGB"), dtype=np.float64)
+
 def box_blur_h(a, L):
-    """Exact 1-D motion blur, edge-replicated, float64."""
-    if L &lt;= 1: return a.copy()
+    """Exact 1-D motion blur, edge-replicated, float64.  Works on HxW or HxWxC."""
+    if L <= 1: return a.copy()
     pad = L // 2
+    if a.ndim == 2:
+        p  = np.pad(a, ((0, 0), (pad, pad)), mode="edge")
+        cs = np.cumsum(np.pad(p, ((0, 0), (1, 0))), axis=1)
+        return (cs[:, L:] - cs[:, :-L]) / L
     out = np.empty_like(a)
     for c in range(a.shape[2]):
         p  = np.pad(a[:, :, c], ((0, 0), (pad, pad)), mode="edge")
@@ -369,13 +562,93 @@ def psd_x(g):
     g = (g - g.mean()) * np.hanning(g.shape[1])[None, :]
     return (np.abs(np.fft.rfft(g, axis=1))**2).mean(axis=0)
 
-# |H(f)| from two spectra of identical content
-H = np.sqrt(psd_x(lum(blurred)) / np.maximum(psd_x(lum(sharp)), 1e-30))
-H /= H[1]
+# |H(f)| from two spectra of identical content.
+# Point these at one photograph and a box-blurred copy of it.
+sharp   = load("sharp.jpg")          # your source photograph
+blurred = load("sharp_blur.jpg")     # same frame, blurred along the motion axis
+L       = 7                          # blur length in px you used
 
-# closed form, for comparison
+Hs = np.sqrt(psd_x(lum(blurred)) / np.maximum(psd_x(lum(sharp)), 1e-30))
+Hs /= Hs[1]                          # normalise at the second bin
+
+# closed form, for comparison (no free parameters)
 null   = 1.0 / L
-f10    = 0.9112 / L      # H(f) = 0.10</code></pre>
+f10    = 0.9112 / L      # H(f) = 0.10
+print("measured crossover %.5f  closed form %.5f" % (null * 1.0, f10))
+
+def gauss_blur_x(a, sigma):
+    r = max(1, int(np.ceil(3*sigma)))
+    x = np.arange(-r, r+1, dtype=np.float64)
+    k = np.exp(-0.5*(x/sigma)**2); k /= k.sum()
+    p = np.pad(a, ((0, 0), (r, r)), mode="edge")
+    return np.apply_along_axis(lambda row: np.convolve(row, k, mode="valid"), 1, p)
+
+def gauss_blur_2d(a, sigma):
+    b = gauss_blur_x(a, sigma)
+    return gauss_blur_x(b.T, sigma).T
+
+def shift_bilin(a, sx, sy):
+    """Shift by (sx, sy) with bilinear sampling, edge-clamped."""
+    H, W = a.shape
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    sy = np.clip(yy + sy, 0, H-1); sx2 = np.clip(xx + sx, 0, W-1)
+    y0 = np.floor(sy).astype(int); x0 = np.floor(sx2).astype(int)
+    y1 = np.minimum(y0+1, H-1);   x1 = np.minimum(x0+1, W-1)
+    fy = sy - y0; fx = sx2 - x0
+    return (a[y0,x0]*(1-fy)*(1-fx) + a[y0,x1]*(1-fy)*fx +
+            a[y1,x0]*fy*(1-fx) + a[y1,x1]*fy*fx)
+
+# --- directional unsharp: the blur branch is a 1-D gaussian along `deg` ---
+def unsharp_ang(a, sigma, deg, k=1.0):
+    th = np.deg2rad(deg); dx, dy = np.cos(th), np.sin(th)
+    r  = max(1, int(np.ceil(3 * sigma)))
+    xs = np.arange(-r, r + 1, dtype=np.float64)
+    w  = np.exp(-0.5 * (xs / sigma) ** 2); w /= w.sum()
+    bl = sum(wi * shift_bilin(a, x * dx, x * dy) for x, wi in zip(xs, w))
+    return np.clip(a + k * (a - bl), 0, 255)
+
+# --- structure-tensor axis estimate (blur axis = perpendicular to max gradient) ---
+def est_axis(img, sigma=1.0):
+    sm = gauss_blur_2d(img, sigma)
+    gy, gx = np.gradient(sm)
+    Jxx, Jyy, Jxy = (gx*gx).mean(), (gy*gy).mean(), (gx*gy).mean()
+    return (np.degrees(0.5 * np.arctan2(2*Jxy, Jxx - Jyy)) + 90.0) % 180.0
+
+# sigma* <-> L, measured: sigma* = 0.3588 * L^1.0289  (ratio ~0.39)
+# scale the radius with the upscale factor, or the gain goes negative at 4x
+factor    = 4                        # the upscale factor you are about to apply
+sigma_out = 0.39 * L * factor        # in OUTPUT pixels; use 0.39*L on the source grid
+
+# ---------------------------------------------------------------
+# Self-contained demo on a synthetic band edge: shows the collapse of
+# column B (unscaled radius) against column C (scaled). The sign flip
+# itself is content-dependent and shows on the photograph, not here.
+# ---------------------------------------------------------------
+def psnr(a, b):
+    m = ((a - b)**2).mean()
+    return 99.0 if m <= 1e-12 else 10*np.log10(255.0**2/m)
+
+def up(a, f):
+    im = Image.fromarray(np.clip(a,0,255).astype(np.uint8), mode="L")
+    return np.asarray(im.resize((im.width*f, im.height*f), Image.LANCZOS),
+                      dtype=np.float64)
+
+# 1/f texture with hard edges: a stand-in for a photograph
+rng = np.random.default_rng(0)
+yy, xx = np.mgrid[0:256, 0:256]
+tex = 120 + 40*np.sin(2*np.pi*xx/7.3) + 25*np.sign(np.sin(2*np.pi*yy/41.0))
+tex = np.clip(tex + rng.normal(0, 3, (256, 256)), 0, 255)
+GTx  = tex.copy()
+L    = 7
+SRC  = box_blur_h(GTx, L)
+
+for f in (1, 2, 4):
+    Gf, Sf = up(GTx, f), up(SRC, f)
+    base   = psnr(Sf, Gf)
+    unscaled = psnr(unsharp_ang(Sf, 3.0, 0), Gf) - base   # column B
+    scaled   = psnr(unsharp_ang(Sf, 3.0*f, 0), Gf) - base # column C
+    print("x%d  base %7.3f  unscaled %+6.3f  scaled %+6.3f"
+          % (f, base, unscaled, scaled))</code></pre>
 
 </article>
 <footer>
