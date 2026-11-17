@@ -262,7 +262,7 @@ already 255 and cannot be recovered by pulling the amount back later. The direct
 its contrast correction where the blur actually is, so it needs less amplitude to achieve the
 same effect and spends less of the headroom.</p>
 
-<h2>The sharpening radius is not free: it tracks the blur length, and that makes it portable across a resize</h2>
+<h2 id="radius-law">The sharpening radius is not free: it tracks the blur length, and that makes it portable across a resize</h2>
 
 <p>The previous section compared directional and isotropic sharpening at three radii and found the
 directional mask ahead every time. That table leaves out the question anyone actually faces, which
@@ -305,7 +305,7 @@ re-weighting it buys nothing. The gain at 21 and 31 px comes back slightly, whic
 wide radius picking up the low-frequency envelope of the blur rather than any restored detail —
 it is a contrast change, not a recovery, and I would not sell it as one.</p>
 
-<h2>Where in the pipeline: sharpening a resized image is not sharpening the original</h2>
+<h2 id="pipeline-order">Where in the pipeline: sharpening a resized image is not sharpening the original</h2>
 
 <p>Now the practical question this creates. A 4× upscale multiplies the pixel grid by four, so a blur
 that was 7 px in the source is 28 px in the output. The rule above says the radius should scale with
@@ -342,7 +342,7 @@ of getting it wrong is not a small erosion but a sign flip. The same ordering qu
 source, where the softness is not motion but ordinary resampling, is measured separately in
 <a href="https://celticgemini001.github.io/upgolab-sharpen-before-or-after-upscale/">sharpen before or after an upscale</a>.</p>
 
-<h2>The axis: a horizontal-only mask is only right within about 30° of horizontal</h2>
+<h2 id="axis">The axis: a horizontal-only mask is only right within about 30° of horizontal</h2>
 
 <p>The page's earlier directional test, like most advice on this, assumed the blur runs along x. Real
 camera motion does not consult the pixel grid. I blurred along eight angles using a bilinear-sampled
@@ -378,7 +378,7 @@ Isotropic sharpening clips 1.231% of pixels where the axis-aligned mask clips 0.
 of 4.4×; at 45° it is 0.906% against 0.176%. An isotropic mask spreads its correction into the
 direction the image is still sharp in, and that is where it overshoots into clipping.</p>
 
-<h2>Can you find the angle from a single frame? Mostly, and the failure is instructive</h2>
+<h2 id="angle-estimate">Can you find the angle from a single frame? Mostly, and the failure is instructive</h2>
 
 <p>The angle is not recorded in the file, so the useful question is whether it can be measured. I
 used the standard structure-tensor estimator: smooth, take gradients, form the 2&times;2 covariance of
